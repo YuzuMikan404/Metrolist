@@ -1,7 +1,7 @@
 <div align="center">
 <img src="https://github.com/YuzuMikan404/Metrolist-Neo/blob/main/icon.png"/>
 <h1>Metrolist Neo</h1>
-<p>Metrolistの更新がリリースされるごとにリリースされるパッケージ名だけ変えた自分用アプリ。中身は一緒です。</p>
+<p>Metrolistの更新がリリースされるごとにリリースされる、名前とアイコン、パッケージ名だけ変えた自分用アプリ。中身は一緒です。</p>
 
 <div style="padding: 16px; margin: 16px 0; background-color: #FFFBE5; border-left: 6px solid #FFC107; border-radius: 4px;">
 <h2 style="margin: 0;"><strong>⚠Warning</strong></h2>
