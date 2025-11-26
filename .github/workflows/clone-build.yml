@@ -1,7 +1,15 @@
 name: Monitor Upstream Release and Build
 
 on:
+  # ここを追加: 入力オプションを定義するとボタンが確実に出ます
   workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: 'Force Rebuild (Delete old release)'
+        required: true
+        default: 'true'
+        type: boolean
+
   schedule:
     - cron: '0 * * * *'
 
@@ -14,7 +22,9 @@ jobs:
     timeout-minutes: 30
     
     steps:
-      # 1. 初期化
+      # ---------------------------------------------------
+      # 1. チェックアウト & 環境設定
+      # ---------------------------------------------------
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
@@ -26,50 +36,67 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           UPSTREAM_TAG=$(gh api repos/mostafaalagamy/Metrolist/releases/latest --jq .tag_name)
-          echo "Target: $UPSTREAM_TAG"
+          echo "Target Version: $UPSTREAM_TAG"
 
-          # 手動実行時は既存リリースを削除して再構築
+          # 手動実行(workflow_dispatch)なら強制削除して実行
           if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "Manual run detected. Resetting release..."
             gh release delete "$UPSTREAM_TAG" --yes --cleanup-tag || true
             git push --delete origin "$UPSTREAM_TAG" || true
+            echo "Cleanup complete."
             echo "trigger=true" >> $GITHUB_OUTPUT
             echo "tag=$UPSTREAM_TAG" >> $GITHUB_OUTPUT
           
-          # 定期実行時は更新があれば実行
+          # 定期実行なら更新がある時だけ
           elif ! git rev-parse "$UPSTREAM_TAG" >/dev/null 2>&1; then
+            echo "New version found."
             echo "trigger=true" >> $GITHUB_OUTPUT
             echo "tag=$UPSTREAM_TAG" >> $GITHUB_OUTPUT
           else
+            echo "No update. Skipping."
             echo "trigger=false" >> $GITHUB_OUTPUT
           fi
 
-      # 2. ソース取得
+      # ---------------------------------------------------
+      # 2. ソース取得 & アイコン退避
+      # ---------------------------------------------------
       - name: Fetch Source
         if: steps.init.outputs.trigger == 'true'
         run: |
           git config user.name "GH Action"
           git config user.email "action@github.com"
+          
+          # アイコンがあれば退避
           [ -f icon.png ] && cp icon.png /tmp/icon.png
+          
           git remote add upstream https://github.com/mostafaalagamy/Metrolist.git
           git fetch upstream --tags
           git checkout -b build-${{ steps.init.outputs.tag }} refs/tags/${{ steps.init.outputs.tag }}
+          
+          # アイコン復元
           [ -f /tmp/icon.png ] && mv /tmp/icon.png icon.png
 
-      # 3. 環境構築
+      # ---------------------------------------------------
+      # 3. ランタイムセットアップ
+      # ---------------------------------------------------
       - if: steps.init.outputs.trigger == 'true'
         uses: actions/setup-java@v4
         with:
           java-version: '21'
           distribution: 'temurin'
+
       - if: steps.init.outputs.trigger == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.x'
+
       - if: steps.init.outputs.trigger == 'true'
         uses: gradle/actions/setup-gradle@v4
 
-      # 4. 画像処理 (色吸い出し & アダプティブ生成)
-      - name: Process Icon Resources
+      # ---------------------------------------------------
+      # 4. 画像処理 (色抽出 & アダプティブ画像生成)
+      # ---------------------------------------------------
+      - name: Process Icon
         if: steps.init.outputs.trigger == 'true'
         run: |
           if [ ! -f icon.png ]; then
@@ -89,7 +116,7 @@ jobs:
               with open('bg_color.txt', 'w') as f: f.write(bg)
               print(f'BG Color: {bg}')
 
-              # アダプティブ用前景生成
+              # 前景レイヤー生成 (65%)
               size = 1080
               target = int(size * 0.65)
               canvas = Image.new('RGBA', (size, size), (0, 0, 0, 0))
@@ -98,42 +125,40 @@ jobs:
               canvas.paste(resized, (off, off), resized)
               canvas.save('icon_foreground.png')
               
-              # 通常アイコン用（角丸などに加工せずそのままリサイズ）
+              # レガシー用 (そのまま)
               img.save('icon_legacy.png')
-
           except Exception as e:
               print(e)
           "
 
-          # ========================================================
-          # 【重要修正】フォルダは消さず、アイコンファイルだけを消す
-          # ========================================================
-          # 1. 既存の ic_launcher* ファイルを全て削除 (tv_banner等は残る)
+          # 【重要】アイコンファイルだけをピンポイント削除 (バナー等は守る)
           find app/src/main/res -type f -name "ic_launcher*" -delete
           
-          # 2. 新しいフォルダ構造の準備
+          # フォルダ作成
           mkdir -p app/src/main/res/mipmap-anydpi-v26
           mkdir -p app/src/main/res/mipmap-xxxhdpi
           mkdir -p app/src/main/res/values
 
-          # 3. アダプティブ設定 (XML)
+          # XML生成
           XML='<?xml version="1.0" encoding="utf-8"?><adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android"><background android:drawable="@color/ic_launcher_background"/><foreground android:drawable="@mipmap/ic_launcher_foreground"/></adaptive-icon>'
           echo "$XML" > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml
           echo "$XML" > app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml
 
-          # 4. 色定義 (XML)
+          # 背景色定義
           BG=$(cat bg_color.txt)
           echo "<?xml version=\"1.0\" encoding=\"utf-8\"?><resources><color name=\"ic_launcher_background\">$BG</color></resources>" > app/src/main/res/values/ic_launcher_background.xml
 
-          # 5. 画像配置 (前景 & レガシー)
+          # 画像配置
           cp icon_foreground.png app/src/main/res/mipmap-xxxhdpi/ic_launcher_foreground.png
-          cp icon_legacy.png app/src/main/res/mipmap-xxxhdpi/ic_launcher.png
-          cp icon_legacy.png app/src/main/res/mipmap-xxxhdpi/ic_launcher_round.png
-          
-          echo "Icons replaced successfully (Safe mode)."
+          if [ -f icon_legacy.png ]; then
+             cp icon_legacy.png app/src/main/res/mipmap-xxxhdpi/ic_launcher.png
+             cp icon_legacy.png app/src/main/res/mipmap-xxxhdpi/ic_launcher_round.png
+          fi
 
-      # 5. コード書き換え (アプリ名 & ID & 設定強制)
-      - name: Modify Code (JS)
+      # ---------------------------------------------------
+      # 5. コード書き換え (アプリ名 & 設定強制)
+      # ---------------------------------------------------
+      - name: Modify Code
         if: steps.init.outputs.trigger == 'true'
         uses: actions/github-script@v7
         with:
@@ -151,24 +176,21 @@ jobs:
                 let c = fs.readFileSync(f, 'utf8');
                 let original = c;
 
-                // build.gradle.kts
+                // Gradle: ID変更, プラグイン無効化, 設定注入
                 if (f.endsWith('build.gradle.kts')) {
                     c = c.replace(/applicationId\s*=\s*"[^"]*"/g, 'applicationId = "com.metrolist.clone"');
                     c = c.replace(/(.*alias\(libs\.plugins\.google\.services\).*)/g, '// $1');
                     c = c.replace(/(.*id\("com\.google\.gms\.google-services"\).*)/g, '// $1');
                     
-                    // Gradleからの強力な値注入
                     if (c.includes('defaultConfig {')) {
                          c = c.replace('defaultConfig {', `defaultConfig {
                          resValue("string", "app_name", "Metrolist Neo")
-                         // 万が一XML生成が失敗してもここで色指定が効くように
                          resValue("color", "ic_launcher_background", "#000000")`);
                     }
                 }
 
-                // AndroidManifest.xml
+                // Manifest: 参照先強制
                 if (f.endsWith('AndroidManifest.xml')) {
-                     // 参照先を強制的に変更
                      c = c.replace(/android:label="[^"]*"/g, 'android:label="@string/app_name"');
                      c = c.replace(/android:icon="[^"]*"/g, 'android:icon="@mipmap/ic_launcher"');
                      if (c.includes('android:roundIcon=')) {
@@ -178,14 +200,18 @@ jobs:
                      }
                 }
                 
-                // 変更があれば書き込み
+                // strings.xml: 直接書き換え (念のため)
+                if (f.endsWith('strings.xml')) {
+                    const r = new RegExp('(<string name="app_name"[^>]*>)([\\s\\S]*?)(<\\/string>)', 'g');
+                    if(r.test(c)) c = c.replace(r, '$1Metrolist Neo$3');
+                }
+
                 if (c !== original) {
                     fs.writeFileSync(f, c, 'utf8');
                     console.log(`Modified: ${f}`);
                 }
             }
 
-            // 再帰的に探索して適用
             function walk(dir) {
                 fs.readdirSync(dir).forEach(f => {
                     let p = `${dir}/${f}`;
@@ -199,17 +225,18 @@ jobs:
         if: steps.init.outputs.trigger == 'true'
         run: chmod +x gradlew
 
-      # 6. ビルド (デーモン無効化で安定動作)
+      # ---------------------------------------------------
+      # 6. ビルド & 署名 & 公開
+      # ---------------------------------------------------
       - name: Build APK
         if: steps.init.outputs.trigger == 'true'
         run: ./gradlew assembleRelease --no-configuration-cache -x lint -x test -Dorg.gradle.daemon=false
         env:
-          GITHUB_EVENT_NAME: pull_request # 署名回避
+          GITHUB_EVENT_NAME: pull_request
           LASTFM_API_KEY: "dummy"
           LASTFM_SECRET: "dummy"
 
-      # 7. 回収・署名・リリース
-      - name: Collect and Release
+      - name: Collect APKs
         if: steps.init.outputs.trigger == 'true'
         run: |
           mkdir -p output_apks
@@ -218,7 +245,6 @@ jobs:
       - name: Sign APK
         if: steps.init.outputs.trigger == 'true'
         uses: ilharp/sign-android-release@v1
-        id: sign
         with:
           releaseDir: output_apks
           signingKey: ${{ secrets.SIGNING_KEY }}
@@ -233,8 +259,9 @@ jobs:
         with:
           tag_name: ${{ steps.init.outputs.tag }}
           name: ${{ steps.init.outputs.tag }}
-          body: Original: https://github.com/mostafaalagamy/Metrolist/releases/tag/${{ steps.init.outputs.tag }}
-          files: ${{ steps.sign.outputs.signedFile }}
+          body: |
+            Original: https://github.com/mostafaalagamy/Metrolist/releases/tag/${{ steps.init.outputs.tag }}
+          files: output_apks/*-signed.apk
           draft: false
           prerelease: false
         env:
