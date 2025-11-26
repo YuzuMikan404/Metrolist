@@ -19,7 +19,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      # 1. Java 17 (ビルドエラー回避のため必須)
       - uses: actions/setup-java@v4
         with:
           java-version: '17'
@@ -31,173 +30,133 @@ jobs:
       
       - uses: gradle/actions/setup-gradle@v4
 
-      # 2. ソース取得
       - name: Check and Fetch
-        id: check
+        id: setup
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG=$(gh api repos/mostafaalagamy/Metrolist/releases/latest --jq .tag_name)
-          echo "Target: $TAG"
-          
+          UPSTREAM_TAG=$(gh api repos/mostafaalagamy/Metrolist/releases/latest --jq .tag_name)
+          echo "Target: $UPSTREAM_TAG"
+
           if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            gh release delete "$TAG" --yes --cleanup-tag || true
-            git push --delete origin "$TAG" || true
+            echo "Manual Run."
+            gh release delete "$UPSTREAM_TAG" --yes --cleanup-tag || true
+            git push --delete origin "$UPSTREAM_TAG" || true
             echo "trigger=true" >> $GITHUB_OUTPUT
-            echo "tag=$TAG" >> $GITHUB_OUTPUT
-          elif ! git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "tag=$UPSTREAM_TAG" >> $GITHUB_OUTPUT
+          elif ! git rev-parse "$UPSTREAM_TAG" >/dev/null 2>&1; then
+            echo "New version found."
             echo "trigger=true" >> $GITHUB_OUTPUT
-            echo "tag=$TAG" >> $GITHUB_OUTPUT
+            echo "tag=$UPSTREAM_TAG" >> $GITHUB_OUTPUT
           else
+            echo "No update."
             echo "trigger=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Fetch Code
-        if: steps.check.outputs.trigger == 'true'
+      - name: Fetch Source
+        if: steps.setup.outputs.trigger == 'true'
         run: |
           git config user.name "GH Action"
           git config user.email "action@github.com"
           if [ -f icon.png ]; then cp icon.png /tmp/icon.png; fi
           git remote add upstream https://github.com/mostafaalagamy/Metrolist.git
           git fetch upstream --tags
-          git checkout -b build-${{ steps.check.outputs.tag }} refs/tags/${{ steps.check.outputs.tag }}
+          git checkout -b build-${{ steps.setup.outputs.tag }} refs/tags/${{ steps.setup.outputs.tag }}
           if [ -f /tmp/icon.png ]; then mv /tmp/icon.png icon.png; fi
 
-      # 3. 改造処理 (ここが最重要修正ポイント)
-      - name: Modify (Python)
-        if: steps.check.outputs.trigger == 'true'
+      - name: Apply Modifications
+        if: steps.setup.outputs.trigger == 'true'
         run: |
           pip install Pillow
-
           cat << 'EOF' > modify.py
-          import os
-          import shutil
-          import re
+          import os, shutil, glob, re
           from PIL import Image, ImageOps
+          APP_ID, APP_NAME, ICON = "com.metrolist.clone", "Metrolist Neo", "icon.png"
+          RES = "app/src/main/res"
 
-          # 設定
-          APP_ID = "com.metrolist.clone"
-          APP_NAME = "Metrolist Neo"
-          
-          # A. アイコン処理 (成功しているのでそのまま)
-          if os.path.exists('icon.png'):
+          if os.path.exists(ICON):
               try:
-                  print('Processing Icon...')
-                  img = Image.open('icon.png').convert('RGBA')
-                  p = img.getpixel((0, 0))
-                  bg = '#{:02x}{:02x}{:02x}'.format(*p[:3]) if p[3] > 0 else '#000000'
+                  img = Image.open(ICON).convert('RGBA')
+                  p = img.getpixel((0,0))
+                  bg = '#{:02x}{:02x}{:02x}'.format(*p[:3]) if p[3]>0 else '#000000'
                   
-                  size = 1080
-                  target = int(size * 0.65)
-                  canvas = Image.new('RGBA', (size, size), (0, 0, 0, 0))
-                  resized = ImageOps.fit(img, (target, target), centering=(0.5, 0.5))
-                  off = (size - target) // 2
-                  canvas.paste(resized, (off, off), resized)
-                  canvas.save('ic_fg.png')
-                  img.save('ic_legacy.png')
+                  size, t = 1080, int(1080*0.65)
+                  can = Image.new('RGBA', (size,size), (0,0,0,0))
+                  r = ImageOps.fit(img, (t,t), centering=(0.5,0.5))
+                  o = (size-t)//2
+                  can.paste(r, (o,o), r)
+                  can.save('fg.png')
+                  img.save('leg.png')
 
-                  # 既存アイコン削除
-                  for root, dirs, files in os.walk('app/src/main/res'):
+                  for r_dir, _, files in os.walk(RES):
                       for f in files:
-                          if 'ic_launcher' in f:
-                              os.remove(os.path.join(root, f))
+                          if 'ic_launcher' in f: os.remove(os.path.join(r_dir, f))
+
+                  for d in [f'{RES}/mipmap-anydpi-v26', f'{RES}/mipmap-xxxhdpi', f'{RES}/values']:
+                      os.makedirs(d, exist_ok=True)
+
+                  xml = f'<?xml version="1.0" encoding="utf-8"?><adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android"><background android:drawable="@color/ic_launcher_background"/><foreground android:drawable="@mipmap/ic_launcher_foreground"/></adaptive-icon>'
+                  with open(f'{RES}/mipmap-anydpi-v26/ic_launcher.xml','w') as f: f.write(xml)
+                  with open(f'{RES}/mipmap-anydpi-v26/ic_launcher_round.xml','w') as f: f.write(xml)
                   
-                  # フォルダ作成
-                  base = 'app/src/main/res'
-                  anydpi = f'{base}/mipmap-anydpi-v26'
-                  legacy = f'{base}/mipmap-xxxhdpi'
-                  values = f'{base}/values'
-                  for d in [anydpi, legacy, values]: os.makedirs(d, exist_ok=True)
-
-                  # XML
-                  xml = f'''<?xml version="1.0" encoding="utf-8"?>
-          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
-              <background android:drawable="@color/ic_launcher_background"/>
-              <foreground android:drawable="@mipmap/ic_launcher_foreground"/>
-          </adaptive-icon>'''
-                  with open(f'{anydpi}/ic_launcher.xml', 'w') as f: f.write(xml)
-                  with open(f'{anydpi}/ic_launcher_round.xml', 'w') as f: f.write(xml)
-
-                  # Colors
-                  cols = f'''<?xml version="1.0" encoding="utf-8"?><resources><color name="ic_launcher_background">{bg}</color></resources>'''
-                  with open(f'{values}/ic_launcher_background.xml', 'w') as f: f.write(cols)
-
-                  # Images
-                  shutil.copy('ic_fg.png', f'{legacy}/ic_launcher_foreground.png')
-                  shutil.copy('ic_legacy.png', f'{legacy}/ic_launcher.png')
-                  shutil.copy('ic_legacy.png', f'{legacy}/ic_launcher_round.png')
-                  print("Icon Updated.")
+                  with open(f'{RES}/values/ic_launcher_background.xml','w') as f:
+                      f.write(f'<?xml version="1.0" encoding="utf-8"?><resources><color name="ic_launcher_background">{bg}</color></resources>')
+                  
+                  shutil.copy('fg.png', f'{RES}/mipmap-xxxhdpi/ic_launcher_foreground.png')
+                  shutil.copy('leg.png', f'{RES}/mipmap-xxxhdpi/ic_launcher.png')
+                  shutil.copy('leg.png', f'{RES}/mipmap-xxxhdpi/ic_launcher_round.png')
               except: pass
 
-          # B. コード修正 (ここを修正！)
-          # ダミーJSON
-          with open('app/google-services.json', 'w') as f:
-              f.write('{"project_info":{"project_number":"0","project_id":"d"},"client":[{"client_info":{"mobilesdk_app_id":"1:0:a:0","android_client_info":{"package_name":"' + APP_ID + '"}},"api_key":[{"current_key":"d"}]}]}')
+          with open('app/google-services.json','w') as f:
+              f.write('{"project_info":{"project_number":"0","project_id":"d"},"client":[{"client_info":{"mobilesdk_app_id":"1:0:a:0","android_client_info":{"package_name":"'+APP_ID+'"}},"api_key":[{"current_key":"d"}]}]}')
 
-          # build.gradle.kts
-          path = 'app/build.gradle.kts'
-          if os.path.exists(path):
-              with open(path, 'r') as f: c = f.read()
-              
-              # 【最重要修正】一括置換はやめる。
-              # applicationId = "..." の行だけをピンポイントで書き換える。
-              # namespace = "..." は元のまま残すことで Rクラスのエラーを防ぐ。
+          if os.path.exists('app/build.gradle.kts'):
+              with open('app/build.gradle.kts','r') as f: c = f.read()
               c = re.sub(r'applicationId\s*=\s*"[^"]*"', f'applicationId = "{APP_ID}"', c)
-
-              # プラグイン無効化
               c = c.replace('alias(libs.plugins.google.services)', '// alias')
               c = c.replace('id("com.google.gms.google-services")', '// id')
-
-              # アプリ名注入 (文法修正済み)
               if 'defaultConfig {' in c:
-                   c = c.replace('defaultConfig {', f'defaultConfig {{ \n resValue("string", "app_name", "{APP_NAME}")')
+                  c = c.replace('defaultConfig {', f'defaultConfig {{ \n resValue("string", "app_name", "{APP_NAME}")')
+              with open('app/build.gradle.kts','w') as f: f.write(c)
 
-              with open(path, 'w') as f: f.write(c)
-              print("Gradle Fixed.")
-
-          # AndroidManifest.xml
-          path = 'app/src/main/AndroidManifest.xml'
-          if os.path.exists(path):
-              with open(path, 'r') as f: c = f.read()
-              
-              # 参照先変更
+          if os.path.exists('app/src/main/AndroidManifest.xml'):
+              with open('app/src/main/AndroidManifest.xml','r') as f: c = f.read()
               c = re.sub(r'android:label="[^"]*"', 'android:label="@string/app_name"', c)
               c = re.sub(r'android:icon="[^"]*"', 'android:icon="@mipmap/ic_launcher"', c)
-              
-              # 丸アイコン設定
               if 'android:roundIcon=' in c:
                   c = re.sub(r'android:roundIcon="[^"]*"', 'android:roundIcon="@mipmap/ic_launcher_round"', c)
               else:
                   c = c.replace('<application', '<application android:roundIcon="@mipmap/ic_launcher_round"')
-                  
-              with open(path, 'w') as f: f.write(c)
-              print("Manifest Fixed.")
+              with open('app/src/main/AndroidManifest.xml','w') as f: f.write(c)
           EOF
-          
           python modify.py
 
       - name: Grant Permissions
-        if: steps.check.outputs.trigger == 'true'
+        if: steps.setup.outputs.trigger == 'true'
         run: chmod +x gradlew
 
-      # 4. ビルド
       - name: Build APK
-        if: steps.check.outputs.trigger == 'true'
+        if: steps.setup.outputs.trigger == 'true'
         run: ./gradlew clean assembleRelease --no-configuration-cache -x lint -x test -Dorg.gradle.daemon=false
         env:
           GITHUB_EVENT_NAME: pull_request
           LASTFM_API_KEY: "dummy"
           LASTFM_SECRET: "dummy"
 
-      # 5. 回収 & 署名 & リリース
-      - name: Collect and Release
-        if: steps.check.outputs.trigger == 'true'
+      # 6. APK回収 (最強版)
+      #    フォルダ階層の深いところにあるAPKも全て見つけ出して一箇所に集めます
+      - name: Collect APKs
+        if: steps.setup.outputs.trigger == 'true'
         run: |
           mkdir -p output_apks
-          find app/build/outputs/apk -name "*.apk" -type f -exec cp {} output_apks/ \;
+          # findコマンドで全てのrelease.apkを検索し、ファイル名が被らないようにリネームしつつ移動
+          find app/build/outputs/apk -name "*release.apk" -print0 | xargs -0 -I {} sh -c 'cp "{}" "output_apks/$(basename "{}" | sed "s/release/neo/")"'
+          
+          echo "Collected APKs:"
+          ls -l output_apks/
 
       - name: Sign APK
-        if: steps.check.outputs.trigger == 'true'
+        if: steps.setup.outputs.trigger == 'true'
         uses: ilharp/sign-android-release@v1
         with:
           releaseDir: output_apks
@@ -208,13 +167,13 @@ jobs:
           buildToolsVersion: "34.0.0"
 
       - name: Create Release
-        if: steps.check.outputs.trigger == 'true'
+        if: steps.setup.outputs.trigger == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.check.outputs.tag }}
-          name: ${{ steps.check.outputs.tag }}
+          tag_name: ${{ steps.setup.outputs.tag }}
+          name: ${{ steps.setup.outputs.tag }}
           body: |
-            Original: https://github.com/mostafaalagamy/Metrolist/releases/tag/${{ steps.check.outputs.tag }}
+            Original: https://github.com/mostafaalagamy/Metrolist/releases/tag/${{ steps.setup.outputs.tag }}
           files: output_apks/*-signed.apk
           draft: false
           prerelease: false
