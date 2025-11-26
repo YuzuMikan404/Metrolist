@@ -131,20 +131,17 @@ jobs:
           LASTFM_API_KEY: "dummy_value"
           LASTFM_SECRET: "dummy_value"
 
-      # 6. 【追加】APKの回収
-      #    バラバラの場所にあるAPKを output_apks フォルダに一箇所に集めます
+      # 6. APKの回収
       - name: Collect APKs
         if: steps.check.outputs.trigger_build == 'true'
         run: |
           mkdir -p output_apks
           echo "Searching for APKs..."
-          # app/build/outputs/apk 以下の全ての .apk ファイルを探してコピー
           find app/build/outputs/apk -name "*.apk" -type f -exec cp {} output_apks/ \;
-          
           echo "Collected APKs:"
           ls -l output_apks/
 
-      # 7. APK署名 (output_apks 内のファイルを署名)
+      # 7. APK署名
       - name: Sign APK
         if: steps.check.outputs.trigger_build == 'true'
         uses: r0adkll/sign-android-release@v1
@@ -158,13 +155,14 @@ jobs:
         env:
           BUILD_TOOLS_VERSION: "34.0.0"
 
-      # 8. リリース作成
+      # 8. リリース作成 (タイトル修正)
       - name: Create Release
         if: steps.check.outputs.trigger_build == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.check.outputs.release_tag }}
-          name: Clone v${{ steps.check.outputs.release_tag }}
+          # ここを修正: タグ名(release_tag)自体にvが含まれているので、そのまま使う
+          name: Metrolist Clone ${{ steps.check.outputs.release_tag }}
           body: |
             Automated clone build based on upstream version ${{ steps.check.outputs.release_tag }}.
             Package Name: `com.metrolist.clone`
