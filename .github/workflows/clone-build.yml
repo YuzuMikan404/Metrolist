@@ -6,7 +6,7 @@ on:
     - cron: '0 * * * *'     # 1時間ごとにチェック
 
 permissions:
-  contents: write           # リリースの作成・削除に必要
+  contents: write           # リリース作成とタグ打ちに必要
 
 jobs:
   check_and_build:
@@ -23,30 +23,22 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 本家の最新タグを取得
           UPSTREAM_TAG=$(gh api repos/mostafaalagamy/Metrolist/releases/latest --jq .tag_name)
           echo "Target version: $UPSTREAM_TAG"
           
-          # --- 分岐処理 ---
           if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            # 【手動実行の場合】強制的に掃除してビルドする
-            echo "Manual trigger detected. Cleaning up old release for $UPSTREAM_TAG..."
-            
-            # 既存のリリースとタグを削除 (エラーが出ても無視して進む || true)
+            echo "Manual trigger detected. Cleaning up old release..."
             gh release delete "$UPSTREAM_TAG" --yes --cleanup-tag || true
             git push --delete origin "$UPSTREAM_TAG" || true
-            
-            echo "Cleanup complete. Force starting build."
+            echo "Cleanup complete."
             echo "trigger=true" >> $GITHUB_OUTPUT
             echo "tag=$UPSTREAM_TAG" >> $GITHUB_OUTPUT
-          
           else
-            # 【定期実行の場合】既にあったら何もしない
             if git rev-parse "$UPSTREAM_TAG" >/dev/null 2>&1; then
               echo "Tag $UPSTREAM_TAG already exists. Skipping."
               echo "trigger=false" >> $GITHUB_OUTPUT
             else
-              echo "New version found. Starting build."
+              echo "New version found."
               echo "trigger=true" >> $GITHUB_OUTPUT
               echo "tag=$UPSTREAM_TAG" >> $GITHUB_OUTPUT
             fi
@@ -85,18 +77,16 @@ jobs:
             pip install Pillow
             python -c "
             from PIL import Image, ImageOps
-            
             try:
                 img = Image.open('icon.png').convert('RGBA')
-                # 背景色抽出
+                # 背景色抽出 (1px)
                 pixel = img.resize((1, 1)).getpixel((0, 0))
                 bg_hex = '#000000' if pixel[3] == 0 else '#{:02x}{:02x}{:02x}'.format(*pixel[:3])
-                
                 with open('bg_color.txt', 'w') as f:
                     f.write(bg_hex)
                 print(f'Background: {bg_hex}')
-
-                # アダプティブ用前景生成 (65%サイズ)
+                
+                # 前景生成 (65%)
                 size = 1080
                 target = int(size * 0.65)
                 canvas = Image.new('RGBA', (size, size), (0, 0, 0, 0))
@@ -104,7 +94,6 @@ jobs:
                 offset = (size - target) // 2
                 canvas.paste(resized, (offset, offset), resized)
                 canvas.save('icon_foreground.png')
-                
             except Exception as e:
                 print(f'Error: {e}')
             "
@@ -112,7 +101,8 @@ jobs:
             echo "#000000" > bg_color.txt
           fi
 
-      # 5. ファイル書き換え (Gradle注入 & XML生成)
+      # 5. ファイル書き換え (JavaScript)
+      # 以前のコードでバックスラッシュが入っていた問題を修正しました
       - name: Apply Modifications
         if: steps.check.outputs.trigger == 'true'
         uses: actions/github-script@v7
@@ -121,7 +111,7 @@ jobs:
             const fs = require('fs');
             const path = require('path');
 
-            // A. アダプティブアイコン設定
+            // --- A. アダプティブアイコン設定 ---
             const bgColor = fs.existsSync('bg_color.txt') ? fs.readFileSync('bg_color.txt', 'utf8').trim() : '#000000';
             const resPath = 'app/src/main/res';
             
@@ -129,22 +119,23 @@ jobs:
                 const anydpi = path.join(resPath, 'mipmap-anydpi-v26');
                 fs.mkdirSync(anydpi, { recursive: true });
                 
-                const xml = \`<?xml version="1.0" encoding="utf-8"?>
+                // ※ 修正点: ここのバッククォート前の \ を削除しました
+                const xmlContent = `<?xml version="1.0" encoding="utf-8"?>
             <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
                 <background android:drawable="@color/ic_launcher_background" />
                 <foreground android:drawable="@mipmap/ic_launcher_foreground" />
-            </adaptive-icon>\`;
+            </adaptive-icon>`;
                 
-                fs.writeFileSync(path.join(anydpi, 'ic_launcher.xml'), xml);
-                fs.writeFileSync(path.join(anydpi, 'ic_launcher_round.xml'), xml);
+                fs.writeFileSync(path.join(anydpi, 'ic_launcher.xml'), xmlContent);
+                fs.writeFileSync(path.join(anydpi, 'ic_launcher_round.xml'), xmlContent);
 
-                fs.readdirSync(resPath).filter(n => n.startsWith('mipmap-') && !n.includes('anydpi')).forEach(dir => {
+                const dirs = fs.readdirSync(resPath).filter(n => n.startsWith('mipmap-') && !n.includes('anydpi'));
+                dirs.forEach(dir => {
                     const p = path.join(resPath, dir);
                     // 古いファイル削除
                     fs.readdirSync(p).filter(f => f.startsWith('ic_launcher')).forEach(f => fs.unlinkSync(path.join(p, f)));
-                    // 新しい前景画像
+                    // 配置
                     fs.copyFileSync('icon_foreground.png', path.join(p, 'ic_launcher_foreground.png'));
-                    // Legacy用
                     if(fs.existsSync('icon.png')) {
                         fs.copyFileSync('icon.png', path.join(p, 'ic_launcher.png'));
                         fs.copyFileSync('icon.png', path.join(p, 'ic_launcher_round.png'));
@@ -152,10 +143,11 @@ jobs:
                 });
             }
 
-            // B. ダミーJSON
-            fs.writeFileSync('app/google-services.json', JSON.stringify({ "project_info": { "project_number": "0", "project_id": "d" }, "client": [{ "client_info": { "mobilesdk_app_id": "1:0:a:0", "android_client_info": { "package_name": "com.metrolist.clone" } }, "api_key": [{ "current_key": "d" }] }] }));
+            // --- B. ダミーJSON ---
+            const dummy = { "project_info": { "project_number": "0", "project_id": "d" }, "client": [{ "client_info": { "mobilesdk_app_id": "1:0:a:0", "android_client_info": { "package_name": "com.metrolist.clone" } }, "api_key": [{ "current_key": "d" }] }] };
+            fs.writeFileSync('app/google-services.json', JSON.stringify(dummy));
 
-            // C. Gradle & Manifest
+            // --- C. Gradle & Manifest ---
             function walk(dir) {
                 fs.readdirSync(dir).forEach(f => {
                     let p = path.join(dir, f);
@@ -171,14 +163,19 @@ jobs:
                     c = c.replace(/applicationId\s*=\s*"[^"]*"/g, 'applicationId = "com.metrolist.clone"');
                     c = c.replace(/(.*alias\(libs\.plugins\.google\.services\).*)/g, '// $1');
                     c = c.replace(/(.*id\("com\.google\.gms\.google-services"\).*)/g, '// $1');
-                    // 値の注入 (Metrolist Neo)
+
+                    // ※ 修正点: ここのバッククォート前の \ も削除しました
                     if (c.includes('defaultConfig {')) {
-                         c = c.replace('defaultConfig {', \`defaultConfig { 
-                         resValue("string", "app_name", "Metrolist Neo")
-                         resValue("color", "ic_launcher_background", "\${bgColor}")\`);
+                         const config = `
+                         defaultConfig {
+                             resValue("string", "app_name", "Metrolist Neo")
+                             resValue("color", "ic_launcher_background", "${bgColor}")
+                         `;
+                         c = c.replace('defaultConfig {', config);
                     }
                     fs.writeFileSync(f, c, 'utf8');
                 }
+
                 // AndroidManifest.xml
                 if (f.endsWith('AndroidManifest.xml')) {
                      let c = fs.readFileSync(f, 'utf8');
@@ -226,13 +223,13 @@ jobs:
           keyPassword: ${{ secrets.KEY_PASSWORD }}
           buildToolsVersion: "34.0.0"
 
-      # 9. リリース (シンプルタイトル・旧タグ削除後の新規作成)
+      # 9. リリース
       - name: Create Release
         if: steps.check.outputs.trigger == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.check.outputs.tag }}
-          name: ${{ steps.check.outputs.tag }} # バージョン番号のみ
+          name: ${{ steps.check.outputs.tag }}
           body: |
             Original: https://github.com/mostafaalagamy/Metrolist/releases/tag/${{ steps.check.outputs.tag }}
           files: output_apks/*-signed.apk
