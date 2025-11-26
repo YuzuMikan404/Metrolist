@@ -11,7 +11,6 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    # メモリ不足でのハングアップを防ぐためタイムアウト設定
     timeout-minutes: 30
 
     steps:
@@ -24,11 +23,11 @@ jobs:
           fetch-depth: 0
 
       # ---------------------------------------------------------
-      # 2. 環境構築 (安定のJava 17を採用)
+      # 2. 環境構築 (Java 21に変更)
       # ---------------------------------------------------------
       - uses: actions/setup-java@v4
         with:
-          java-version: '17'
+          java-version: '21'  # ここを17から21へ変更
           distribution: 'temurin'
       
       - uses: actions/setup-python@v5
@@ -48,7 +47,6 @@ jobs:
           UPSTREAM_TAG=$(gh api repos/mostafaalagamy/Metrolist/releases/latest --jq .tag_name)
           echo "Target: $UPSTREAM_TAG"
 
-          # 手動実行時は強制リビルド (旧リリース削除)
           if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
             gh release delete "$UPSTREAM_TAG" --yes --cleanup-tag || true
             git push --delete origin "$UPSTREAM_TAG" || true
@@ -66,26 +64,22 @@ jobs:
         run: |
           git config user.name "Action"
           git config user.email "action@github.com"
-          # 自分のアイコンを一時保存
           if [ -f icon.png ]; then cp icon.png /tmp/icon.png; fi
           
-          # 本家を取得
           git remote add upstream https://github.com/mostafaalagamy/Metrolist.git
           git fetch upstream --tags
           git checkout -b build-${{ steps.check.outputs.tag }} refs/tags/${{ steps.check.outputs.tag }}
           
-          # アイコンを戻す
           if [ -f /tmp/icon.png ]; then mv /tmp/icon.png icon.png; fi
 
       # ---------------------------------------------------------
-      # 4. 改造スクリプト (Java Downgrade & Resource Override)
+      # 4. 改造スクリプト (Java 21のまま維持するよう修正)
       # ---------------------------------------------------------
       - name: Apply Modifications
         if: steps.check.outputs.trigger == 'true'
         run: |
           pip install Pillow
 
-          # Pythonスクリプトを作成
           cat << 'EOF' > modify.py
           import os
           import shutil
@@ -103,7 +97,7 @@ jobs:
           def process_icon():
               if not os.path.exists(ICON_SRC):
                   print('Warning: No icon.png found.')
-                  return ('#000000') # Default black
+                  return ('#000000')
 
               try:
                   print(f'Processing {ICON_SRC}...')
@@ -112,9 +106,8 @@ jobs:
                   # 背景色抽出
                   p = img.resize((1, 1)).getpixel((0, 0))
                   bg_hex = '#{:02x}{:02x}{:02x}'.format(*p[:3]) if p[3] > 0 else '#000000'
-                  print(f'Detected Background: {bg_hex}')
 
-                  # 前景画像 (中央配置)
+                  # 前景画像
                   size = 1080
                   target = int(size * 0.65)
                   canvas = Image.new('RGBA', (size, size), (0, 0, 0, 0))
@@ -124,19 +117,16 @@ jobs:
                   canvas.save('ic_foreground_gen.png')
                   img.save('ic_legacy_gen.png')
 
-                  # 既存アイコン(ic_launcher)のみ削除
                   for root, dirs, files in os.walk(RES_DIR):
                       for f in files:
                           if 'ic_launcher' in f:
                               os.remove(os.path.join(root, f))
 
-                  # 新規リソースフォルダ
                   anydpi = os.path.join(RES_DIR, 'mipmap-anydpi-v26')
                   legacy = os.path.join(RES_DIR, 'mipmap-xxxhdpi')
                   values = os.path.join(RES_DIR, 'values')
                   for d in [anydpi, legacy, values]: os.makedirs(d, exist_ok=True)
 
-                  # XML (アダプティブ定義)
                   xml = f'''<?xml version="1.0" encoding="utf-8"?>
           <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
               <background android:drawable="@color/ic_launcher_background" />
@@ -145,12 +135,10 @@ jobs:
                   with open(os.path.join(anydpi, 'ic_launcher.xml'), 'w') as f: f.write(xml)
                   with open(os.path.join(anydpi, 'ic_launcher_round.xml'), 'w') as f: f.write(xml)
 
-                  # 色定義
                   c_xml = f'''<?xml version="1.0" encoding="utf-8"?>
           <resources><color name="ic_launcher_background">{bg_hex}</color></resources>'''
                   with open(os.path.join(values, 'ic_launcher_background.xml'), 'w') as f: f.write(c_xml)
 
-                  # 画像配置
                   shutil.copy('ic_foreground_gen.png', os.path.join(legacy, 'ic_launcher_foreground.png'))
                   shutil.copy('ic_legacy_gen.png', os.path.join(legacy, 'ic_launcher.png'))
                   shutil.copy('ic_legacy_gen.png', os.path.join(legacy, 'ic_launcher_round.png'))
@@ -166,7 +154,7 @@ jobs:
               with open('app/google-services.json', 'w') as f:
                   f.write('{"project_info":{"project_number":"0","project_id":"d"},"client":[{"client_info":{"mobilesdk_app_id":"1:0:a:0","android_client_info":{"package_name":"' + APP_ID + '"}},"api_key":[{"current_key":"d"}]}]}')
 
-              # build.gradle.kts (Javaバージョン書き換え & 設定注入)
+              # build.gradle.kts
               g_path = 'app/build.gradle.kts'
               if os.path.exists(g_path):
                   with open(g_path, 'r') as f: c = f.read()
@@ -178,24 +166,20 @@ jobs:
                   c = re.sub(r'(.*alias\(libs\.plugins\.google\.services\).*)', r'// \1', c)
                   c = re.sub(r'(.*id\(\"com\.google\.gms\.google-services\"\).*)', r'// \1', c)
 
-                  # 3. 【重要】Javaバージョンの強制ダウングレード
-                  # VERSION_21 -> VERSION_17, "21" -> "17" へ書き換えて、ビルド環境と合わせる
-                  c = c.replace('JavaVersion.VERSION_21', 'JavaVersion.VERSION_17')
-                  c = c.replace('jvmTarget = "21"', 'jvmTarget = "17"')
-
-                  # 4. アプリ名 & 背景色 の注入 (Kotlin DSL文法)
+                  # 3. Javaバージョンダウングレード処理は削除 (Java 21環境に合わせるため不要)
+                  
+                  # 4. アプリ名 & 背景色 の注入
                   if 'defaultConfig {' in c:
                       inj = f'defaultConfig {{ \n resValue("string", "app_name", "{APP_NAME}") \n resValue("color", "ic_launcher_background_gradle", "{bg_hex}")'
                       c = c.replace('defaultConfig {', inj)
                   
                   with open(g_path, 'w') as f: f.write(c)
-                  print("Gradle Updated (Downgraded to Java 17).")
+                  print("Gradle Updated.")
 
               # Manifest修正
               m_path = 'app/src/main/AndroidManifest.xml'
               if os.path.exists(m_path):
                   with open(m_path, 'r') as f: c = f.read()
-                  # 強制的に参照先を変更
                   c = re.sub(r'android:label="[^"]*"', 'android:label="@string/app_name"', c)
                   c = re.sub(r'android:icon="[^"]*"', 'android:icon="@mipmap/ic_launcher"', c)
                   if 'android:roundIcon=' in c:
@@ -216,10 +200,11 @@ jobs:
         if: steps.check.outputs.trigger == 'true'
         run: chmod +x gradlew
 
-      # 5. ビルド (Cleanを挟んで環境変数を渡す)
+      # 5. ビルド (stacktrace追加とメモリ制限の明示)
       - name: Build APK
         if: steps.check.outputs.trigger == 'true'
-        run: ./gradlew clean assembleRelease --no-configuration-cache -x lint -x test -Dorg.gradle.daemon=false
+        # Gradleのメモリを2GBに制限し、詳細ログを出すように変更
+        run: ./gradlew clean assembleRelease --no-configuration-cache --stacktrace -Dorg.gradle.jvmargs="-Xmx2048m"
         env:
           GITHUB_EVENT_NAME: pull_request
           LASTFM_API_KEY: "dummy"
@@ -230,7 +215,6 @@ jobs:
         if: steps.check.outputs.trigger == 'true'
         run: |
           mkdir -p output_apks
-          # releaseフォルダ以下にある全てのapkを探す
           find app/build/outputs/apk -name "*.apk" -type f -exec cp {} output_apks/ \;
 
       # 7. 署名
