@@ -20,10 +20,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      # 2. 環境構築 (ここを修正：Java 17に戻す)
+      # 2. 環境構築
       - uses: actions/setup-java@v4
         with:
-          java-version: '17' # 21だと新しすぎてエラーになるため17へ
+          java-version: '21' # 最新環境に戻しました
           distribution: 'temurin'
       
       - uses: actions/setup-python@v5
@@ -97,7 +97,7 @@ jobs:
                   print(f'Detected Background: {bg_hex}')
 
                   size = 1080
-                  target = int(size * 0.70)
+                  target = int(size * 0.65) # 65%に縮小
                   canvas = Image.new('RGBA', (size, size), (0, 0, 0, 0))
                   img_resized = ImageOps.fit(img, (target, target), centering=(0.5, 0.5))
                   offset = (size - target) // 2
@@ -105,6 +105,7 @@ jobs:
                   canvas.save('ic_foreground_gen.png')
                   img.save('ic_legacy_gen.png')
 
+                  # 既存アイコン削除
                   for root, dirs, files in os.walk(RES_DIR):
                       for f in files:
                           if 'ic_launcher' in f:
@@ -115,6 +116,7 @@ jobs:
                   values = os.path.join(RES_DIR, 'values')
                   for d in [anydpi, legacy, values]: os.makedirs(d, exist_ok=True)
 
+                  # XML
                   xml = f'''<?xml version="1.0" encoding="utf-8"?>
           <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
               <background android:drawable="@color/ic_launcher_background" />
@@ -123,13 +125,16 @@ jobs:
                   with open(os.path.join(anydpi, 'ic_launcher.xml'), 'w') as f: f.write(xml)
                   with open(os.path.join(anydpi, 'ic_launcher_round.xml'), 'w') as f: f.write(xml)
 
+                  # Colors
                   c_xml = f'''<?xml version="1.0" encoding="utf-8"?>
           <resources><color name="ic_launcher_background">{bg_hex}</color></resources>'''
                   with open(os.path.join(values, 'ic_launcher_background.xml'), 'w') as f: f.write(c_xml)
 
+                  # 画像配置
                   shutil.copy('ic_foreground_gen.png', os.path.join(legacy, 'ic_launcher_foreground.png'))
                   shutil.copy('ic_legacy_gen.png', os.path.join(legacy, 'ic_launcher.png'))
                   shutil.copy('ic_legacy_gen.png', os.path.join(legacy, 'ic_launcher_round.png'))
+                  
               except Exception as e:
                   print(f'Icon Error: {e}')
 
@@ -143,6 +148,7 @@ jobs:
                   c = c.replace('com.metrolist.music', APP_ID)
                   c = re.sub(r'(.*alias\(libs\.plugins\.google\.services\).*)', r'// \1', c)
                   c = re.sub(r'(.*id\(\"com\.google\.gms\.google-services\"\).*)', r'// \1', c)
+                  # 構文修正済み: resValue("...", "...", "...")
                   if 'defaultConfig {' in c:
                       c = c.replace('defaultConfig {', f'defaultConfig {{ \n resValue("string", "app_name", "{APP_NAME}")')
                   with open(g_path, 'w') as f: f.write(c)
@@ -169,10 +175,10 @@ jobs:
         if: steps.setup.outputs.trigger == 'true'
         run: chmod +x gradlew
 
-      # 5. ビルド
+      # 5. ビルド (cleanタスクを追加して確実に)
       - name: Build APK
         if: steps.setup.outputs.trigger == 'true'
-        run: ./gradlew assembleRelease --no-configuration-cache -x lint -x test -Dorg.gradle.daemon=false
+        run: ./gradlew clean assembleRelease --no-configuration-cache -x lint -x test -Dorg.gradle.daemon=false
         env:
           GITHUB_EVENT_NAME: pull_request
           LASTFM_API_KEY: "dummy"
