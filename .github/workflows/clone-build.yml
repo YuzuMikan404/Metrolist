@@ -58,29 +58,37 @@ jobs:
         if: steps.check.outputs.trigger_build == 'true'
         uses: gradle/actions/setup-gradle@v4
 
-      # 4. 【重要】クローン化処理 (IDのみ変更・ソースコードは触らない)
+      # 4. 【最重要】クローン化処理
       - name: Modify for Clone
         if: steps.check.outputs.trigger_build == 'true'
         run: |
           echo "Applying clone modifications..."
 
           # ---------------------------------------------------------
-          # 1. build.gradle(.kts) の applicationId だけを書き換える
-          #    これにより、コードはいじらずに「別アプリ」として認識させます。
+          # 1. applicationId (ID) の変更
           # ---------------------------------------------------------
           find . -name "build.gradle.kts" -exec sed -i 's/applicationId = "com.metrolist.music"/applicationId = "com.metrolist.clone"/' {} + || true
           find . -name "build.gradle" -exec sed -i 's/applicationId "com.metrolist.music"/applicationId "com.metrolist.clone"/' {} + || true
 
-          # 2. アプリ名（ホーム画面の表示名）の変更
+          # ---------------------------------------------------------
+          # 2. Google Services対策 (これがエラーの主犯)
+          #    設定ファイル(google-services.json)がある場合、中身のIDも書き換える
+          # ---------------------------------------------------------
+          find . -name "google-services.json" -exec sed -i 's/com.metrolist.music/com.metrolist.clone/g' {} + || true
+
+          # プラグイン自体も可能な限り無効化を試みる (正規表現を強化)
+          find . -name "build.gradle.kts" -exec sed -i 's/alias(.*google.*services.*/\/\/ &/' {} + || true
+          find . -name "build.gradle.kts" -exec sed -i 's/id(.*google.*services.*/\/\/ &/' {} + || true
+
+          # ---------------------------------------------------------
+          # 3. アプリ名の変更
+          # ---------------------------------------------------------
           sed -i 's/>Metrolist</>Metrolist Clone</g' app/src/main/res/values/strings.xml || true
 
-          # 3. 署名設定の無効化（エラー回避のためコメントアウト）
+          # ---------------------------------------------------------
+          # 4. 署名設定の無効化
+          # ---------------------------------------------------------
           find . -name "build.gradle.kts" -exec sed -i 's/signingConfig =/\/\/ signingConfig =/g' {} + || true
-          
-          # 4. Google Servicesプラグインの無効化（パッケージ名変更によるエラー回避）
-          #    IDを変えるとFirebaseなどが動かなくなるため、ビルドを通すためにプラグインを外します。
-          find . -name "build.gradle.kts" -exec sed -i 's/alias(libs.plugins.google.services)/\/\/ alias(libs.plugins.google.services)/g' {} + || true
-          find . -name "build.gradle.kts" -exec sed -i 's/id("com.google.gms.google-services")/\/\/ id("com.google.gms.google-services")/g' {} + || true
 
           echo "Modification complete."
 
@@ -91,9 +99,9 @@ jobs:
       # 5. ビルド実行
       - name: Build Release APK
         if: steps.check.outputs.trigger_build == 'true'
-        # -x lint: チェックをスキップ
-        # -x test: テストをスキップ
-        run: ./gradlew assembleRelease -x lint -x test --stacktrace
+        # --no-configuration-cache: キャッシュ起因のエラーを防ぐ
+        # -x lint -x test: 余計なチェックをスキップ
+        run: ./gradlew assembleRelease --no-configuration-cache -x lint -x test --stacktrace
         env:
           LASTFM_API_KEY: "dummy_value"
           LASTFM_SECRET: "dummy_value"
