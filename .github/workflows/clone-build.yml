@@ -23,7 +23,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # オリジナルの最新リリースのタグ名を取得 (GitHub CLIを使用)
+          # オリジナルの最新リリースのタグ名を取得
           UPSTREAM_TAG=$(gh api repos/mostafaalagamy/Metrolist/releases/latest --jq .tag_name)
           echo "Upstream latest tag: $UPSTREAM_TAG"
           
@@ -47,17 +47,21 @@ jobs:
           git remote add upstream https://github.com/mostafaalagamy/Metrolist.git
           git fetch upstream --tags
           
-          # 該当のタグにチェックアウト（これで完全に同じソースコード状態になる）
+          # 該当のタグにチェックアウト
           git checkout -b build-${{ steps.check.outputs.release_tag }} refs/tags/${{ steps.check.outputs.release_tag }}
 
-      # 3. Javaセットアップ
-      - name: Set up JDK 17
+      # 3. Java 21 セットアップ (ここを修正しました)
+      - name: Set up JDK 21
         if: steps.check.outputs.trigger_build == 'true'
         uses: actions/setup-java@v4
         with:
-          java-version: '17'
+          java-version: '21'
           distribution: 'temurin'
-          cache: gradle
+
+      # Gradleのセットアップ（ビルドの安定性向上）
+      - name: Setup Gradle
+        if: steps.check.outputs.trigger_build == 'true'
+        uses: gradle/actions/setup-gradle@v4
 
       # 4. パッケージ名・アプリ名の書き換え（クローン化）
       - name: Rename Package and App Name
@@ -65,7 +69,7 @@ jobs:
         run: |
           echo "Modifying package to com.metrolist.clone ..."
 
-          # build.gradleの書き換え
+          # build.gradle(.kts)の書き換え
           find . -name "build.gradle*" -print0 | xargs -0 sed -i 's/com.metrolist.music/com.metrolist.clone/g'
           
           # ソースコードとXMLの書き換え
@@ -82,7 +86,7 @@ jobs:
       # 5. ビルド実行
       - name: Build Release APK
         if: steps.check.outputs.trigger_build == 'true'
-        run: ./gradlew assembleRelease
+        run: ./gradlew assembleRelease --stacktrace
 
       # 6. APK署名
       - name: Sign APK
@@ -103,8 +107,8 @@ jobs:
         if: steps.check.outputs.trigger_build == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.check.outputs.release_tag }}  # オリジナルと同じタグ名を使用
-          name: Clone v${{ steps.check.outputs.release_tag }} # タイトル
+          tag_name: ${{ steps.check.outputs.release_tag }}
+          name: Clone v${{ steps.check.outputs.release_tag }}
           body: |
             Automated clone build based on upstream version ${{ steps.check.outputs.release_tag }}.
             Original: https://github.com/mostafaalagamy/Metrolist/releases/tag/${{ steps.check.outputs.release_tag }}
