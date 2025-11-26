@@ -20,10 +20,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      # 2. 環境構築
+      # 2. 環境構築 (ここを17にするのが正解)
       - uses: actions/setup-java@v4
         with:
-          java-version: '21' # 最新環境に戻しました
+          java-version: '17'
           distribution: 'temurin'
       
       - uses: actions/setup-python@v5
@@ -97,7 +97,7 @@ jobs:
                   print(f'Detected Background: {bg_hex}')
 
                   size = 1080
-                  target = int(size * 0.65) # 65%に縮小
+                  target = int(size * 0.65)
                   canvas = Image.new('RGBA', (size, size), (0, 0, 0, 0))
                   img_resized = ImageOps.fit(img, (target, target), centering=(0.5, 0.5))
                   offset = (size - target) // 2
@@ -105,18 +105,19 @@ jobs:
                   canvas.save('ic_foreground_gen.png')
                   img.save('ic_legacy_gen.png')
 
-                  # 既存アイコン削除
+                  # アイコン削除 (安全策)
                   for root, dirs, files in os.walk(RES_DIR):
                       for f in files:
                           if 'ic_launcher' in f:
                               os.remove(os.path.join(root, f))
 
+                  # 配置
                   anydpi = os.path.join(RES_DIR, 'mipmap-anydpi-v26')
                   legacy = os.path.join(RES_DIR, 'mipmap-xxxhdpi')
                   values = os.path.join(RES_DIR, 'values')
                   for d in [anydpi, legacy, values]: os.makedirs(d, exist_ok=True)
 
-                  # XML
+                  # XML定義
                   xml = f'''<?xml version="1.0" encoding="utf-8"?>
           <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
               <background android:drawable="@color/ic_launcher_background" />
@@ -125,7 +126,7 @@ jobs:
                   with open(os.path.join(anydpi, 'ic_launcher.xml'), 'w') as f: f.write(xml)
                   with open(os.path.join(anydpi, 'ic_launcher_round.xml'), 'w') as f: f.write(xml)
 
-                  # Colors
+                  # 色定義
                   c_xml = f'''<?xml version="1.0" encoding="utf-8"?>
           <resources><color name="ic_launcher_background">{bg_hex}</color></resources>'''
                   with open(os.path.join(values, 'ic_launcher_background.xml'), 'w') as f: f.write(c_xml)
@@ -139,20 +140,27 @@ jobs:
                   print(f'Icon Error: {e}')
 
           def process_code():
+              # ダミーJSON
               with open('app/google-services.json', 'w') as f:
                   f.write('{"project_info":{"project_number":"0","project_id":"d"},"client":[{"client_info":{"mobilesdk_app_id":"1:0:a:0","android_client_info":{"package_name":"' + APP_ID + '"}},"api_key":[{"current_key":"d"}]}]}')
 
+              # Gradle修正
               g_path = 'app/build.gradle.kts'
               if os.path.exists(g_path):
                   with open(g_path, 'r') as f: c = f.read()
                   c = c.replace('com.metrolist.music', APP_ID)
                   c = re.sub(r'(.*alias\(libs\.plugins\.google\.services\).*)', r'// \1', c)
                   c = re.sub(r'(.*id\(\"com\.google\.gms\.google-services\"\).*)', r'// \1', c)
-                  # 構文修正済み: resValue("...", "...", "...")
+                  
+                  # ★★★ ここが修正の肝 ★★★
+                  # 前回のエラー原因: resValue "string", ... (Groovy風)
+                  # 今回の修正:       resValue("string", ...) (Kotlin DSL 正しい書き方)
                   if 'defaultConfig {' in c:
                       c = c.replace('defaultConfig {', f'defaultConfig {{ \n resValue("string", "app_name", "{APP_NAME}")')
+                  
                   with open(g_path, 'w') as f: f.write(c)
 
+              # Manifest修正
               m_path = 'app/src/main/AndroidManifest.xml'
               if os.path.exists(m_path):
                   with open(m_path, 'r') as f: c = f.read()
@@ -175,10 +183,10 @@ jobs:
         if: steps.setup.outputs.trigger == 'true'
         run: chmod +x gradlew
 
-      # 5. ビルド (cleanタスクを追加して確実に)
+      # 5. ビルド (Java 17で実行)
       - name: Build APK
         if: steps.setup.outputs.trigger == 'true'
-        run: ./gradlew clean assembleRelease --no-configuration-cache -x lint -x test -Dorg.gradle.daemon=false
+        run: ./gradlew assembleRelease --no-configuration-cache -x lint -x test -Dorg.gradle.daemon=false
         env:
           GITHUB_EVENT_NAME: pull_request
           LASTFM_API_KEY: "dummy"
