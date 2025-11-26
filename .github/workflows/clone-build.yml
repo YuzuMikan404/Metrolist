@@ -1,238 +1,246 @@
 name: Monitor Upstream Release and Build
 
 on:
-  workflow_dispatch:        # 手動実行用
+  workflow_dispatch:
   schedule:
-    - cron: '0 * * * *'     # 1時間ごとにチェック
+    - cron: '0 * * * *'
 
 permissions:
-  contents: write           # リリース作成とタグ打ちに必要
+  contents: write
 
 jobs:
-  check_and_build:
+  process_and_release:
     runs-on: ubuntu-latest
+    # タイムアウトを設定（万が一の暴走防止）
+    timeout-minutes: 30
+    
     steps:
-      - name: Checkout
+      # ---------------------------------------------------------
+      # 1. 初期化・チェック・ソース取得
+      # ---------------------------------------------------------
+      - name: Checkout Code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # 1. 更新チェック & (手動時は) 旧リリース削除
-      - name: Check and Cleanup
-        id: check
+      - name: Check Updates & Setup Environment
+        id: init
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # 最新タグ取得
           UPSTREAM_TAG=$(gh api repos/mostafaalagamy/Metrolist/releases/latest --jq .tag_name)
-          echo "Target version: $UPSTREAM_TAG"
-          
+          echo "Target: $UPSTREAM_TAG"
+
+          # 手動実行(workflow_dispatch)なら、既存リリースを破壊して強制実行
           if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            echo "Manual trigger detected. Cleaning up old release..."
+            echo "Manual mode: Resetting release..."
             gh release delete "$UPSTREAM_TAG" --yes --cleanup-tag || true
             git push --delete origin "$UPSTREAM_TAG" || true
-            echo "Cleanup complete."
+            echo "trigger=true" >> $GITHUB_OUTPUT
+            echo "tag=$UPSTREAM_TAG" >> $GITHUB_OUTPUT
+          
+          # 定期実行なら、更新がある時だけ実行
+          elif ! git rev-parse "$UPSTREAM_TAG" >/dev/null 2>&1; then
+            echo "New version detected."
             echo "trigger=true" >> $GITHUB_OUTPUT
             echo "tag=$UPSTREAM_TAG" >> $GITHUB_OUTPUT
           else
-            if git rev-parse "$UPSTREAM_TAG" >/dev/null 2>&1; then
-              echo "Tag $UPSTREAM_TAG already exists. Skipping."
-              echo "trigger=false" >> $GITHUB_OUTPUT
-            else
-              echo "New version found."
-              echo "trigger=true" >> $GITHUB_OUTPUT
-              echo "tag=$UPSTREAM_TAG" >> $GITHUB_OUTPUT
-            fi
+            echo "Up to date. Skipping."
+            echo "trigger=false" >> $GITHUB_OUTPUT
           fi
 
-      # 2. ソース取得 & アイコン準備
-      - name: Fetch Source
-        if: steps.check.outputs.trigger == 'true'
+      - name: Fetch Upstream Source
+        if: steps.init.outputs.trigger == 'true'
         run: |
-          git config user.name "GitHub Action"
+          git config user.name "GH Action"
           git config user.email "action@github.com"
-          cp icon.png /tmp/icon.png || echo "No icon found"
+          # アイコン退避
+          [ -f icon.png ] && cp icon.png /tmp/icon.png
+          
+          # ソース取得
           git remote add upstream https://github.com/mostafaalagamy/Metrolist.git
           git fetch upstream --tags
-          git checkout -b build-${{ steps.check.outputs.tag }} refs/tags/${{ steps.check.outputs.tag }}
-          if [ -f /tmp/icon.png ]; then mv /tmp/icon.png icon.png; fi
+          git checkout -b build-${{ steps.init.outputs.tag }} refs/tags/${{ steps.init.outputs.tag }}
+          
+          # アイコン復元
+          [ -f /tmp/icon.png ] && mv /tmp/icon.png icon.png
 
-      # 3. 環境構築
-      - if: steps.check.outputs.trigger == 'true'
+      # ---------------------------------------------------------
+      # 2. ビルド環境の構築
+      # ---------------------------------------------------------
+      - if: steps.init.outputs.trigger == 'true'
         uses: actions/setup-java@v4
         with:
           java-version: '21'
           distribution: 'temurin'
-      - if: steps.check.outputs.trigger == 'true'
+          
+      - if: steps.init.outputs.trigger == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.x'
-      - if: steps.check.outputs.trigger == 'true'
+          
+      - if: steps.init.outputs.trigger == 'true'
         uses: gradle/actions/setup-gradle@v4
 
-      # 4. アイコン処理 (色吸い出し & 前景生成)
-      - name: Process Icon
-        if: steps.check.outputs.trigger == 'true'
+      # ---------------------------------------------------------
+      # 3. リソース・アイコンの完全再構築 (破壊と再生)
+      # ---------------------------------------------------------
+      - name: Rebuild Resources (Icon & Colors)
+        if: steps.init.outputs.trigger == 'true'
         run: |
-          if [ -f icon.png ]; then
-            pip install Pillow
-            python -c "
-            from PIL import Image, ImageOps
-            try:
-                img = Image.open('icon.png').convert('RGBA')
-                # 背景色抽出 (1px)
-                pixel = img.resize((1, 1)).getpixel((0, 0))
-                bg_hex = '#000000' if pixel[3] == 0 else '#{:02x}{:02x}{:02x}'.format(*pixel[:3])
-                with open('bg_color.txt', 'w') as f:
-                    f.write(bg_hex)
-                print(f'Background: {bg_hex}')
-                
-                # 前景生成 (65%)
-                size = 1080
-                target = int(size * 0.65)
-                canvas = Image.new('RGBA', (size, size), (0, 0, 0, 0))
-                resized = ImageOps.fit(img, (target, target), centering=(0.5, 0.5))
-                offset = (size - target) // 2
-                canvas.paste(resized, (offset, offset), resized)
-                canvas.save('icon_foreground.png')
-            except Exception as e:
-                print(f'Error: {e}')
-            "
-          else
+          if [ ! -f icon.png ]; then
+            echo "Warning: icon.png not found. Using fallback."
             echo "#000000" > bg_color.txt
+            exit 0
           fi
 
-      # 5. ファイル書き換え (JavaScript)
-      # 以前のコードでバックスラッシュが入っていた問題を修正しました
-      - name: Apply Modifications
-        if: steps.check.outputs.trigger == 'true'
+          # Pythonで画像処理（色吸い出し & 前景生成）
+          pip install Pillow
+          python -c "
+          from PIL import Image, ImageOps
+          try:
+              img = Image.open('icon.png').convert('RGBA')
+              # 背景色抽出 (平均色)
+              p = img.resize((1, 1)).getpixel((0, 0))
+              bg = '#{:02x}{:02x}{:02x}'.format(*p[:3]) if p[3] > 0 else '#000000'
+              with open('bg_color.txt', 'w') as f: f.write(bg)
+              print(f'Auto-detected Background: {bg}')
+
+              # アダプティブ用前景 (65%サイズ)
+              size = 1080
+              target = int(size * 0.65)
+              canvas = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+              resized = ImageOps.fit(img, (target, target), centering=(0.5, 0.5))
+              off = (size - target) // 2
+              canvas.paste(resized, (off, off), resized)
+              canvas.save('icon_foreground.png')
+              print('Foreground layer created.')
+          except Exception as e:
+              print(f'Error: {e}')
+          "
+
+          # 既存のアイコンフォルダを全削除 (シェルで一括削除が最速・確実)
+          rm -rf app/src/main/res/mipmap-*
+          
+          # 新しいフォルダ構成を作成
+          mkdir -p app/src/main/res/mipmap-anydpi-v26
+          mkdir -p app/src/main/res/mipmap-xxxhdpi
+          mkdir -p app/src/main/res/values
+
+          # XML定義ファイル作成
+          XML='<?xml version="1.0" encoding="utf-8"?><adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android"><background android:drawable="@color/ic_launcher_background"/><foreground android:drawable="@mipmap/ic_launcher_foreground"/></adaptive-icon>'
+          echo "$XML" > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml
+          echo "$XML" > app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml
+
+          # 色定義ファイル作成
+          BG_COLOR=$(cat bg_color.txt)
+          echo "<?xml version=\"1.0\" encoding=\"utf-8\"?><resources><color name=\"ic_launcher_background\">$BG_COLOR</color></resources>" > app/src/main/res/values/ic_launcher_background.xml
+
+          # 画像ファイル配置
+          cp icon_foreground.png app/src/main/res/mipmap-xxxhdpi/ic_launcher_foreground.png
+          # Legacy用
+          cp icon.png app/src/main/res/mipmap-xxxhdpi/ic_launcher.png
+          cp icon.png app/src/main/res/mipmap-xxxhdpi/ic_launcher_round.png
+          
+          echo "Resource reconstruction complete."
+
+      # ---------------------------------------------------------
+      # 4. コード書き換え (Gradle & Manifest)
+      # ---------------------------------------------------------
+      - name: Modify Source Code (JS)
+        if: steps.init.outputs.trigger == 'true'
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
-            const path = require('path');
-
-            // --- A. アダプティブアイコン設定 ---
-            const bgColor = fs.existsSync('bg_color.txt') ? fs.readFileSync('bg_color.txt', 'utf8').trim() : '#000000';
-            const resPath = 'app/src/main/res';
             
-            if (fs.existsSync(resPath) && fs.existsSync('icon_foreground.png')) {
-                const anydpi = path.join(resPath, 'mipmap-anydpi-v26');
-                fs.mkdirSync(anydpi, { recursive: true });
-                
-                // ※ 修正点: ここのバッククォート前の \ を削除しました
-                const xmlContent = `<?xml version="1.0" encoding="utf-8"?>
-            <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
-                <background android:drawable="@color/ic_launcher_background" />
-                <foreground android:drawable="@mipmap/ic_launcher_foreground" />
-            </adaptive-icon>`;
-                
-                fs.writeFileSync(path.join(anydpi, 'ic_launcher.xml'), xmlContent);
-                fs.writeFileSync(path.join(anydpi, 'ic_launcher_round.xml'), xmlContent);
+            // ダミーJSON生成
+            fs.writeFileSync('app/google-services.json', JSON.stringify({
+              "project_info": {"project_number":"0","project_id":"d"},
+              "client": [{"client_info":{"mobilesdk_app_id":"1:0:a:0","android_client_info":{"package_name":"com.metrolist.clone"}},"api_key":[{"current_key":"d"}]}]
+            }));
 
-                const dirs = fs.readdirSync(resPath).filter(n => n.startsWith('mipmap-') && !n.includes('anydpi'));
-                dirs.forEach(dir => {
-                    const p = path.join(resPath, dir);
-                    // 古いファイル削除
-                    fs.readdirSync(p).filter(f => f.startsWith('ic_launcher')).forEach(f => fs.unlinkSync(path.join(p, f)));
-                    // 配置
-                    fs.copyFileSync('icon_foreground.png', path.join(p, 'ic_launcher_foreground.png'));
-                    if(fs.existsSync('icon.png')) {
-                        fs.copyFileSync('icon.png', path.join(p, 'ic_launcher.png'));
-                        fs.copyFileSync('icon.png', path.join(p, 'ic_launcher_round.png'));
-                    }
-                });
-            }
-
-            // --- B. ダミーJSON ---
-            const dummy = { "project_info": { "project_number": "0", "project_id": "d" }, "client": [{ "client_info": { "mobilesdk_app_id": "1:0:a:0", "android_client_info": { "package_name": "com.metrolist.clone" } }, "api_key": [{ "current_key": "d" }] }] };
-            fs.writeFileSync('app/google-services.json', JSON.stringify(dummy));
-
-            // --- C. Gradle & Manifest ---
-            function walk(dir) {
-                fs.readdirSync(dir).forEach(f => {
-                    let p = path.join(dir, f);
-                    if (f === '.git') return;
-                    fs.statSync(p).isDirectory() ? walk(p) : process(p);
-                });
-            }
-
-            function process(f) {
-                // build.gradle.kts
-                if (f.endsWith('build.gradle.kts')) {
-                    let c = fs.readFileSync(f, 'utf8');
-                    c = c.replace(/applicationId\s*=\s*"[^"]*"/g, 'applicationId = "com.metrolist.clone"');
-                    c = c.replace(/(.*alias\(libs\.plugins\.google\.services\).*)/g, '// $1');
-                    c = c.replace(/(.*id\("com\.google\.gms\.google-services"\).*)/g, '// $1');
-
-                    // ※ 修正点: ここのバッククォート前の \ も削除しました
-                    if (c.includes('defaultConfig {')) {
-                         const config = `
-                         defaultConfig {
-                             resValue("string", "app_name", "Metrolist Neo")
-                             resValue("color", "ic_launcher_background", "${bgColor}")
-                         `;
-                         c = c.replace('defaultConfig {', config);
-                    }
-                    fs.writeFileSync(f, c, 'utf8');
+            function modify(path, regex, replacement) {
+              if(fs.existsSync(path)) {
+                let c = fs.readFileSync(path, 'utf8');
+                if(regex.test(c)) {
+                  fs.writeFileSync(path, c.replace(regex, replacement), 'utf8');
+                  console.log(`Modified ${path}`);
                 }
-
-                // AndroidManifest.xml
-                if (f.endsWith('AndroidManifest.xml')) {
-                     let c = fs.readFileSync(f, 'utf8');
-                     c = c.replace(/android:label="[^"]*"/g, 'android:label="@string/app_name"');
-                     c = c.replace(/android:icon="[^"]*"/g, 'android:icon="@mipmap/ic_launcher"');
-                     if (c.includes('android:roundIcon=')) {
-                         c = c.replace(/android:roundIcon="[^"]*"/g, 'android:roundIcon="@mipmap/ic_launcher_round"');
-                     } else {
-                         c = c.replace('<application', '<application android:roundIcon="@mipmap/ic_launcher_round"');
-                     }
-                     fs.writeFileSync(f, c, 'utf8');
-                }
+              }
             }
-            walk('.');
 
-      - name: Grant permissions
-        if: steps.check.outputs.trigger == 'true'
-        run: chmod +x gradlew
+            // 1. build.gradle.kts (ID変更, プラグイン無効化, 設定注入)
+            const gradlePath = 'app/build.gradle.kts';
+            if(fs.existsSync(gradlePath)) {
+                let c = fs.readFileSync(gradlePath, 'utf8');
+                c = c.replace(/applicationId\s*=\s*"[^"]*"/g, 'applicationId = "com.metrolist.clone"');
+                c = c.replace(/(.*alias\(libs\.plugins\.google\.services\).*)/g, '// $1');
+                c = c.replace(/(.*id\("com\.google\.gms\.google-services"\).*)/g, '// $1');
+                
+                // defaultConfigブロックにresValueを注入 (最も強力な上書き)
+                if(c.includes('defaultConfig {')) {
+                   c = c.replace('defaultConfig {', `defaultConfig {
+                   resValue("string", "app_name", "Metrolist Neo")
+                   // 念のためここでも色を定義しておく
+                   resValue("color", "ic_launcher_background_gradle", "#000000")`); 
+                }
+                fs.writeFileSync(gradlePath, c, 'utf8');
+            }
 
-      # 6. ビルド
+            // 2. Manifest (アイコンとラベルの強制参照変更)
+            const manifestPath = 'app/src/main/res/AndroidManifest.xml';
+            if(fs.existsSync(manifestPath)) {
+                let c = fs.readFileSync(manifestPath, 'utf8');
+                // Gradleで定義したapp_nameを参照させる
+                c = c.replace(/android:label="[^"]*"/g, 'android:label="@string/app_name"');
+                // 作成したアイコンを参照させる
+                c = c.replace(/android:icon="[^"]*"/g, 'android:icon="@mipmap/ic_launcher"');
+                // 丸アイコン設定がない場合に備えて application タグごと置換
+                if(!c.includes('android:roundIcon')) {
+                   c = c.replace('<application', '<application android:roundIcon="@mipmap/ic_launcher_round"');
+                } else {
+                   c = c.replace(/android:roundIcon="[^"]*"/g, 'android:roundIcon="@mipmap/ic_launcher_round"');
+                }
+                fs.writeFileSync(manifestPath, c, 'utf8');
+            }
+
+      # ---------------------------------------------------------
+      # 5. ビルド & 署名 & リリース
+      # ---------------------------------------------------------
       - name: Build APK
-        if: steps.check.outputs.trigger == 'true'
-        run: ./gradlew assembleRelease --no-configuration-cache -x lint -x test
+        if: steps.init.outputs.trigger == 'true'
+        run: |
+          chmod +x gradlew
+          # デーモン無効化(-Dorg.gradle.daemon=false)でCIの安定性向上
+          ./gradlew assembleRelease --no-configuration-cache -x lint -x test -Dorg.gradle.daemon=false
         env:
-          GITHUB_EVENT_NAME: pull_request
+          GITHUB_EVENT_NAME: pull_request # 署名エラー回避の魔法
           LASTFM_API_KEY: "dummy"
           LASTFM_SECRET: "dummy"
 
-      # 7. 回収
-      - name: Collect APKs
-        if: steps.check.outputs.trigger == 'true'
-        run: |
-          mkdir -p output_apks
-          find app/build/outputs/apk -name "*.apk" -type f -exec cp {} output_apks/ \;
-
-      # 8. 署名
-      - name: Sign APK
-        if: steps.check.outputs.trigger == 'true'
+      - name: Collect and Sign
+        if: steps.init.outputs.trigger == 'true'
         uses: ilharp/sign-android-release@v1
+        id: sign
         with:
-          releaseDir: output_apks
+          releaseDir: app/build/outputs/apk/release/
           signingKey: ${{ secrets.SIGNING_KEY }}
           keyAlias: ${{ secrets.ALIAS }}
           keyStorePassword: ${{ secrets.KEY_STORE_PASSWORD }}
           keyPassword: ${{ secrets.KEY_PASSWORD }}
           buildToolsVersion: "34.0.0"
 
-      # 9. リリース
       - name: Create Release
-        if: steps.check.outputs.trigger == 'true'
+        if: steps.init.outputs.trigger == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.check.outputs.tag }}
-          name: ${{ steps.check.outputs.tag }}
+          tag_name: ${{ steps.init.outputs.tag }}
+          name: ${{ steps.init.outputs.tag }}
           body: |
-            Original: https://github.com/mostafaalagamy/Metrolist/releases/tag/${{ steps.check.outputs.tag }}
-          files: output_apks/*-signed.apk
+            Original: https://github.com/mostafaalagamy/Metrolist/releases/tag/${{ steps.init.outputs.tag }}
+          files: ${{ steps.sign.outputs.signedFile }} # 署名済みファイルパスを自動取得
           draft: false
           prerelease: false
         env:
