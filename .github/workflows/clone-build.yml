@@ -17,7 +17,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      # 1. オリジナルの最新リリースタグを取得し、自分のリポジトリと比較する
+      # 1. オリジナルの最新リリースタグを取得し、自分のリポジトリと比較
       - name: Check for new release
         id: check
         env:
@@ -58,38 +58,41 @@ jobs:
         if: steps.check.outputs.trigger_build == 'true'
         uses: gradle/actions/setup-gradle@v4
 
-      # 4. パッケージ名・アプリ名の書き換え
-      - name: Rename Package and App Name
+      # 4. 【重要】クローン化処理（IDと名前だけを変更し、コードは壊さない）
+      - name: Modify for Clone
         if: steps.check.outputs.trigger_build == 'true'
         run: |
-          echo "Modifying package to com.metrolist.clone ..."
+          echo "Applying clone modifications..."
           
-          # Gradle設定内のID置換
-          find . -name "build.gradle*" -print0 | xargs -0 sed -i 's/com.metrolist.music/com.metrolist.clone/g'
+          # 1. applicationId（インストールID）のみを変更
+          # これだけで別アプリとして認識され、インストール可能になります
+          find . -name "build.gradle.kts" -print0 | xargs -0 sed -i 's/applicationId = "com.metrolist.music"/applicationId = "com.metrolist.clone"/'
           
-          # ソースコードとXML内のパッケージ参照置換
-          find app/src/main -type f -name "*.kt" -print0 | xargs -0 sed -i 's/com.metrolist.music/com.metrolist.clone/g'
-          find app/src/main -type f -name "*.xml" -print0 | xargs -0 sed -i 's/com.metrolist.music/com.metrolist.clone/g'
-
-          # アプリ名の書き換え
+          # 2. アプリ名（表示名）を変更
           sed -i 's/>Metrolist</>Metrolist Clone</g' app/src/main/res/values/strings.xml
+
+          # 3. オリジナルの署名設定を無効化（エラー回避）
+          # signingConfig = ... という行をコメントアウトして無効にします
+          find . -name "build.gradle.kts" -print0 | xargs -0 sed -i 's/signingConfig =/\/\/ signingConfig =/g'
+
+          echo "Modification complete."
 
       - name: Grant execute permission for gradlew
         if: steps.check.outputs.trigger_build == 'true'
         run: chmod +x gradlew
 
-      # 5. ビルド実行 (ここを修正: ダミーキー追加 + Lintスキップ)
+      # 5. ビルド実行
       - name: Build Release APK
         if: steps.check.outputs.trigger_build == 'true'
-        # -x lint : エラーチェックをスキップ
+        # -x lint : エラーチェックをスキップ（これが重要）
         # -x test : テストをスキップ
         run: ./gradlew assembleRelease -x lint -x test --stacktrace
         env:
-          # ビルドを通すためのダミー値
+          # ビルドを通すためのダミーAPIキー
           LASTFM_API_KEY: "dummy_value"
           LASTFM_SECRET: "dummy_value"
 
-      # 6. APK署名
+      # 6. APK署名 (GitHub Secretsの鍵を使用)
       - name: Sign APK
         if: steps.check.outputs.trigger_build == 'true'
         uses: r0adkll/sign-android-release@v1
@@ -112,6 +115,7 @@ jobs:
           name: Clone v${{ steps.check.outputs.release_tag }}
           body: |
             Automated clone build based on upstream version ${{ steps.check.outputs.release_tag }}.
+            Package Name: `com.metrolist.clone`
             Original: https://github.com/mostafaalagamy/Metrolist/releases/tag/${{ steps.check.outputs.release_tag }}
           files: ${{ steps.sign_app.outputs.signedReleaseFile }}
           draft: false
