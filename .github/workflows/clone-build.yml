@@ -41,9 +41,18 @@ jobs:
         run: |
           git config user.name "GitHub Action"
           git config user.email "action@github.com"
+          
+          # カスタムアイコンを退避
+          cp icon.png /tmp/custom_icon.png || echo "No custom icon found."
+
           git remote add upstream https://github.com/mostafaalagamy/Metrolist.git
           git fetch upstream --tags
           git checkout -b build-${{ steps.check.outputs.release_tag }} refs/tags/${{ steps.check.outputs.release_tag }}
+
+          # カスタムアイコンを復元
+          if [ -f /tmp/custom_icon.png ]; then
+            mv /tmp/custom_icon.png icon.png
+          fi
 
       # 3. Java 21 セットアップ
       - name: Set up JDK 21
@@ -58,7 +67,7 @@ jobs:
         if: steps.check.outputs.trigger_build == 'true'
         uses: gradle/actions/setup-gradle@v4
 
-      # 4. クローン化処理（JSスクリプト）
+      # 4. 【改造】Metrolist Neo化 & 強力なアイコン置換
       - name: Modify for Clone (JavaScript)
         if: steps.check.outputs.trigger_build == 'true'
         uses: actions/github-script@v7
@@ -66,6 +75,53 @@ jobs:
           script: |
             const fs = require('fs');
             const path = require('path');
+
+            // --- アイコン強制置換処理 ---
+            if (fs.existsSync('icon.png')) {
+                console.log("Custom icon found. Replacing...");
+                const iconPath = 'icon.png';
+                const resPath = 'app/src/main/res';
+                
+                // mipmapフォルダを走査
+                if (fs.existsSync(resPath)) {
+                    const dirs = fs.readdirSync(resPath).filter(name => name.startsWith('mipmap-'));
+                    
+                    dirs.forEach(dirName => {
+                        const dirPath = path.join(resPath, dirName);
+                        
+                        // "anydpi" フォルダにはXML形式のアイコン定義が入っており、
+                        // これが残っていると画像(png)よりも優先されてしまうため、関連ファイルを削除して無効化する。
+                        if (dirName.includes('anydpi')) {
+                             const files = fs.readdirSync(dirPath);
+                             files.forEach(file => {
+                                 if (file.startsWith('ic_launcher')) {
+                                     fs.unlinkSync(path.join(dirPath, file));
+                                     console.log(`Removed adaptive icon config: ${path.join(dirName, file)}`);
+                                 }
+                             });
+                             return; 
+                        }
+
+                        // 通常の画像フォルダ (mdpi, hdpi, xhdpi...)
+                        ['ic_launcher', 'ic_launcher_round'].forEach(baseName => {
+                            // 1. 既存のアイコン(webp, png, xml)を徹底的に削除
+                            ['.webp', '.png', '.xml'].forEach(ext => {
+                                const existing = path.join(dirPath, baseName + ext);
+                                if (fs.existsSync(existing)) {
+                                    fs.unlinkSync(existing);
+                                }
+                            });
+                            
+                            // 2. 自分の png をコピーして配置
+                            fs.copyFileSync(iconPath, path.join(dirPath, baseName + '.png'));
+                        });
+                    });
+                    console.log("Icon replacement complete (WebP/Adaptive removed).");
+                }
+            } else {
+                console.log("WARNING: icon.png not found. Skipping icon replacement.");
+            }
+            // ---------------------------
 
             function walkDir(dir, callback) {
                 fs.readdirSync(dir).forEach(f => {
@@ -76,9 +132,7 @@ jobs:
                 });
             }
 
-            console.log("Starting modification...");
-
-            // 1. ダミーの google-services.json を作成
+            // ダミーjson作成
             const dummyJson = {
               "project_info": { "project_number": "000000000000", "project_id": "dummy", "storage_bucket": "dummy" },
               "client": [{
@@ -88,16 +142,15 @@ jobs:
             };
             fs.writeFileSync('app/google-services.json', JSON.stringify(dummyJson));
 
-            // 2. ファイルの書き換え
+            // ファイル書き換え
             walkDir('.', function(filePath) {
                 if (filePath.endsWith('build.gradle.kts')) {
                     let content = fs.readFileSync(filePath, 'utf8');
                     let original = content;
                     
-                    // applicationId (ID) を変更
+                    // ID書き換え
                     content = content.replace(/applicationId\s*=\s*"[^"]*"/g, 'applicationId = "com.metrolist.clone"');
-                    
-                    // Google Services Plugin をコメントアウト
+                    // プラグイン無効化
                     content = content.replace(/(.*alias\(libs\.plugins\.google\.services\).*)/g, '// $1');
                     content = content.replace(/(.*id\("com\.google\.gms\.google-services"\).*)/g, '// $1');
 
@@ -106,16 +159,17 @@ jobs:
                         console.log(`Modified: ${filePath}`);
                     }
                 }
+                
+                // アプリ名書き換え (Metrolist -> Metrolist Neo)
                 if (filePath.endsWith('strings.xml')) {
                     let content = fs.readFileSync(filePath, 'utf8');
                     if (content.includes('>Metrolist<')) {
-                        content = content.replace(/>Metrolist</g, '>Metrolist Clone<');
+                        console.log(`Renaming app name in ${filePath}`);
+                        content = content.replace(/>Metrolist</g, '>Metrolist Neo<');
                         fs.writeFileSync(filePath, content, 'utf8');
-                        console.log(`Modified: ${filePath}`);
                     }
                 }
             });
-            console.log("Modification complete.");
 
       - name: Grant execute permission for gradlew
         if: steps.check.outputs.trigger_build == 'true'
@@ -124,24 +178,20 @@ jobs:
       # 5. ビルド実行
       - name: Build Release APK
         if: steps.check.outputs.trigger_build == 'true'
-        # PRモード(署名設定バイパス)でビルド
         run: ./gradlew assembleRelease --no-configuration-cache -x lint -x test --stacktrace
         env:
-          GITHUB_EVENT_NAME: pull_request
+          GITHUB_EVENT_NAME: pull_request # 署名回避マジック
           LASTFM_API_KEY: "dummy_value"
           LASTFM_SECRET: "dummy_value"
 
-      # 6. APKの回収
+      # 6. APK回収
       - name: Collect APKs
         if: steps.check.outputs.trigger_build == 'true'
         run: |
           mkdir -p output_apks
-          echo "Searching for APKs..."
           find app/build/outputs/apk -name "*.apk" -type f -exec cp {} output_apks/ \;
-          echo "Collected APKs:"
-          ls -l output_apks/
 
-      # 7. APK署名
+      # 7. 署名
       - name: Sign APK
         if: steps.check.outputs.trigger_build == 'true'
         uses: r0adkll/sign-android-release@v1
@@ -155,17 +205,18 @@ jobs:
         env:
           BUILD_TOOLS_VERSION: "34.0.0"
 
-      # 8. リリース作成 (タイトル修正)
+      # 8. リリース作成
       - name: Create Release
         if: steps.check.outputs.trigger_build == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.check.outputs.release_tag }}
-          # ここを修正: タグ名(release_tag)自体にvが含まれているので、そのまま使う
-          name: Metrolist Clone ${{ steps.check.outputs.release_tag }}
+          # タイトル変更: Metrolist Neo v...
+          name: Metrolist Neo ${{ steps.check.outputs.release_tag }}
           body: |
             Automated clone build based on upstream version ${{ steps.check.outputs.release_tag }}.
             Package Name: `com.metrolist.clone`
+            App Name: `Metrolist Neo`
             Original: https://github.com/mostafaalagamy/Metrolist/releases/tag/${{ steps.check.outputs.release_tag }}
           files: output_apks/*-signed.apk
           draft: false
